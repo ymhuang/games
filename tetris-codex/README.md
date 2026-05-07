@@ -1,8 +1,8 @@
 # UEFI Tetris
 
-A small freestanding C Tetris game for the UEFI Shell. It draws the board through
-Graphics Output Protocol framebuffer access and reads controls through the UEFI
-simple text input protocol.
+A small freestanding C two-player Tetris game for the UEFI Shell. It draws the
+boards through Graphics Output Protocol Blt calls and reads controls through the
+UEFI simple text input protocol.
 
 ## Build
 
@@ -30,13 +30,16 @@ tetris.efi
 
 Controls:
 
-- Arrow left/right: move
-- Arrow up: rotate
-- Arrow down: soft drop
-- Space: hard drop
+- Player 1: arrow left/right to move, arrow up to rotate, arrow down to soft
+  drop, Space to hard drop
+- Player 2: A/D to move, W to rotate, S to soft drop, F to hard drop
 - P: pause
-- R: restart after game over
+- R: restart both players
 - Q or Esc: quit
+
+Clearing two, three, or four lines sends the same number of garbage rows to the
+other player from the bottom of their board. Clearing one line only clears the
+local board.
 
 ## Notes
 
