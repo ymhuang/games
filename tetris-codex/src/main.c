@@ -19,6 +19,7 @@
 #define LINE_SCORE_LEVEL_BONUS 25U
 #define HARD_DROP_SCORE_PER_ROW 1U
 #define SOFT_DROP_SCORE 1U
+#define AUTO_INPUT_FRAMES 4U
 #define UI_TOP_MARGIN 48U
 #define UI_SIDE_MARGIN 64U
 #define UI_BOARD_EXTRA_COLUMNS 6U
@@ -48,6 +49,7 @@ static EFI_BOOT_SERVICES *g_bs;
 static EFI_GRAPHICS_OUTPUT_PROTOCOL *g_gop;
 static UINT32 rng_state = 0x31415926U;
 static int paused;
+static int auto_play;
 
 typedef enum {
     ActionMoveLeft,
@@ -75,7 +77,26 @@ typedef struct {
     int game_over;
 } Player;
 
+typedef struct {
+    int valid;
+    int piece_type;
+    int target_rot;
+    int target_x;
+    UINTN frame;
+} AutoTarget;
+
 static Player players[PLAYER_COUNT];
+static AutoTarget auto_targets[PLAYER_COUNT];
+
+static UINTN player_index(Player *player)
+{
+    return player == &players[0] ? 0U : 1U;
+}
+
+static void invalidate_auto_target(Player *player)
+{
+    auto_targets[player_index(player)].valid = 0;
+}
 
 /* UEFI/platform data */
 
@@ -219,6 +240,7 @@ static void spawn_piece(Player *player)
     player->current.y = PIECE_SPAWN_Y;
     player->current.rot = 0;
     player->next_piece = make_piece();
+    invalidate_auto_target(player);
     if (collides(player, player->current)) {
         player->game_over = 1;
     }
@@ -302,6 +324,7 @@ static void append_garbage(Player *player, UINTN count)
 
         for (x = 0; x < BOARD_W; x++) {
             if (player->board[0][x] != EMPTY) {
+                invalidate_auto_target(player);
                 player->game_over = 1;
                 return;
             }
@@ -318,7 +341,10 @@ static void append_garbage(Player *player, UINTN count)
     }
 
     if (collides(player, player->current)) {
+        invalidate_auto_target(player);
         player->game_over = 1;
+    } else {
+        invalidate_auto_target(player);
     }
 }
 
@@ -392,6 +418,223 @@ static void hard_drop(Player *player)
     }
     player->score += dropped * HARD_DROP_SCORE_PER_ROW;
     finish_locked_piece(player);
+}
+
+/* Automatic play */
+
+static int iabs(int value)
+{
+    return value < 0 ? -value : value;
+}
+
+static void copy_board(UINT32 dst[BOARD_H][BOARD_W], UINT32 src[BOARD_H][BOARD_W])
+{
+    int y;
+    int x;
+
+    for (y = 0; y < BOARD_H; y++) {
+        for (x = 0; x < BOARD_W; x++) {
+            dst[y][x] = src[y][x];
+        }
+    }
+}
+
+static void place_piece_on_board(UINT32 board[BOARD_H][BOARD_W], Piece piece)
+{
+    int py;
+    int px;
+
+    for (py = 0; py < PIECE_GRID; py++) {
+        for (px = 0; px < PIECE_GRID; px++) {
+            int bx;
+            int by;
+
+            if (!piece_cell(piece.type, piece.rot, px, py)) {
+                continue;
+            }
+            bx = piece.x + px;
+            by = piece.y + py;
+            if (by >= 0 && by < BOARD_H && bx >= 0 && bx < BOARD_W) {
+                board[by][bx] = (UINT32)piece.type + 1U;
+            }
+        }
+    }
+}
+
+static UINTN clear_lines_from_board(UINT32 board[BOARD_H][BOARD_W])
+{
+    int y;
+    UINTN cleared = 0;
+
+    for (y = BOARD_H - 1; y >= 0; y--) {
+        int full = 1;
+        int x;
+
+        for (x = 0; x < BOARD_W; x++) {
+            if (board[y][x] == EMPTY) {
+                full = 0;
+                break;
+            }
+        }
+
+        if (full) {
+            int yy;
+            for (yy = y; yy > 0; yy--) {
+                for (x = 0; x < BOARD_W; x++) {
+                    board[yy][x] = board[yy - 1][x];
+                }
+            }
+            for (x = 0; x < BOARD_W; x++) {
+                board[0][x] = EMPTY;
+            }
+            cleared++;
+            y++;
+        }
+    }
+    return cleared;
+}
+
+static int evaluate_board(UINT32 board[BOARD_H][BOARD_W], UINTN cleared, int target_x)
+{
+    int heights[BOARD_W];
+    int aggregate_height = 0;
+    int max_height = 0;
+    int holes = 0;
+    int bumpiness = 0;
+    int x;
+
+    for (x = 0; x < BOARD_W; x++) {
+        int y;
+        int seen_block = 0;
+
+        heights[x] = 0;
+        for (y = 0; y < BOARD_H; y++) {
+            if (board[y][x] != EMPTY) {
+                if (!seen_block) {
+                    heights[x] = BOARD_H - y;
+                    aggregate_height += heights[x];
+                    if (heights[x] > max_height) {
+                        max_height = heights[x];
+                    }
+                    seen_block = 1;
+                }
+            } else if (seen_block) {
+                holes++;
+            }
+        }
+    }
+
+    for (x = 0; x < BOARD_W - 1; x++) {
+        bumpiness += iabs(heights[x] - heights[x + 1]);
+    }
+
+    return (int)cleared * 1000 - holes * 650 - aggregate_height * 45 -
+           bumpiness * 35 - max_height * 20 - iabs((target_x * 2) - BOARD_W);
+}
+
+static int landing_for(Player *player, int rot, int x, Piece *landing)
+{
+    Piece p = player->current;
+
+    p.rot = rot;
+    p.x = x;
+    if (collides(player, p)) {
+        return 0;
+    }
+
+    p.y++;
+    while (!collides(player, p)) {
+        p.y++;
+    }
+    p.y--;
+    *landing = p;
+    return 1;
+}
+
+static void plan_auto_target(Player *player)
+{
+    AutoTarget *target = &auto_targets[player_index(player)];
+    int best_score = -2147483647;
+    int found = 0;
+    int rot;
+    int x;
+
+    target->valid = 0;
+    target->piece_type = player->current.type;
+
+    for (rot = 0; rot < PIECE_ROTATIONS; rot++) {
+        for (x = -PIECE_GRID; x < BOARD_W; x++) {
+            UINT32 board[BOARD_H][BOARD_W];
+            Piece landing;
+            UINTN cleared;
+            int score;
+
+            if (!landing_for(player, rot, x, &landing)) {
+                continue;
+            }
+
+            copy_board(board, player->board);
+            place_piece_on_board(board, landing);
+            cleared = clear_lines_from_board(board);
+            score = evaluate_board(board, cleared, x);
+            if (!found || score > best_score) {
+                found = 1;
+                best_score = score;
+                target->target_rot = rot;
+                target->target_x = x;
+            }
+        }
+    }
+
+    target->valid = found;
+}
+
+static void tick_auto_player(Player *player)
+{
+    AutoTarget *target = &auto_targets[player_index(player)];
+    Piece before;
+
+    if (!auto_play || paused || player->game_over) {
+        return;
+    }
+
+    target->frame++;
+    if (target->frame < AUTO_INPUT_FRAMES) {
+        return;
+    }
+    target->frame = 0;
+
+    if (!target->valid || target->piece_type != player->current.type) {
+        plan_auto_target(player);
+    }
+    if (!target->valid) {
+        hard_drop(player);
+        return;
+    }
+
+    before = player->current;
+    if (player->current.rot != target->target_rot) {
+        rotate_piece(player);
+        if (player->current.rot == before.rot && player->current.x == before.x) {
+            target->valid = 0;
+        }
+        return;
+    }
+
+    if (player->current.x < target->target_x) {
+        if (!move_piece(player, 1, 0)) {
+            target->valid = 0;
+        }
+        return;
+    }
+    if (player->current.x > target->target_x) {
+        if (!move_piece(player, -1, 0)) {
+            target->valid = 0;
+        }
+        return;
+    }
+
+    hard_drop(player);
 }
 
 /* Rendering */
@@ -488,7 +731,9 @@ static void draw_game(void)
     print_uint(players[1].score);
     print(L" Lines: ");
     print_uint(players[1].lines);
-    print(L"                    \r\nP1: Arrows + Space   P2: WASD + F   P: pause   R: restart   Q/Esc: quit                    \r\n");
+    print(L"                    \r\nP1: Arrows + Space   P2: WASD + F   T: auto ");
+    print(auto_play ? L"on" : L"off");
+    print(L"   P: pause   R: restart   Q/Esc: quit                    \r\n");
     if (paused) {
         print(L"Paused. Press P to resume.                    \r\n");
     } else if (players[0].game_over && players[1].game_over) {
@@ -508,6 +753,7 @@ static void reset_player(Player *player)
 {
     int y;
     int x;
+    AutoTarget *target = &auto_targets[player_index(player)];
 
     for (y = 0; y < BOARD_H; y++) {
         for (x = 0; x < BOARD_W; x++) {
@@ -519,6 +765,8 @@ static void reset_player(Player *player)
     player->frame = 0;
     player->drop_frames = INITIAL_DROP_FRAMES;
     player->game_over = 0;
+    target->valid = 0;
+    target->frame = 0;
     player->next_piece = make_piece();
     spawn_piece(player);
 }
@@ -633,11 +881,19 @@ static int handle_input(void)
             paused = !paused;
             continue;
         }
+        if (key.UnicodeChar == L't' || key.UnicodeChar == L'T') {
+            auto_play = !auto_play;
+            auto_targets[0].valid = 0;
+            auto_targets[1].valid = 0;
+            auto_targets[0].frame = 0;
+            auto_targets[1].frame = 0;
+            continue;
+        }
         if (paused) {
             continue;
         }
 
-        if (key_to_player_action(&key, &player, &action)) {
+        if (!auto_play && key_to_player_action(&key, &player, &action)) {
             handle_player_input(player, action);
         }
     }
@@ -649,6 +905,8 @@ static void tick_player(Player *player)
     if (paused || player->game_over) {
         return;
     }
+
+    tick_auto_player(player);
 
     if (player->frame >= player->drop_frames) {
         player->frame = 0;

@@ -35,6 +35,7 @@ Controls:
 - Player 1: arrow left/right to move, arrow up to rotate, arrow down to soft
   drop, Space to hard drop
 - Player 2: A/D to move, W to rotate, S to soft drop, F to hard drop
+- T: toggle automatic play for both players
 - P: pause
 - R: restart both players
 - Q or Esc: quit
