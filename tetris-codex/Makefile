@@ -8,6 +8,7 @@ EFI := $(BUILD)/$(APP).efi
 CC ?= gcc
 LD ?= ld
 OBJCOPY ?= objcopy
+READELF ?= readelf
 
 CFLAGS := -std=c99 -Wall -Wextra -Werror -ffreestanding -fno-stack-protector \
 	-fno-stack-check -fpic -fshort-wchar -mno-red-zone -maccumulate-outgoing-args \
@@ -16,11 +17,18 @@ CFLAGS := -std=c99 -Wall -Wextra -Werror -ffreestanding -fno-stack-protector \
 
 LDFLAGS := -nostdlib -znocombreloc -T uefi.lds -shared -Bsymbolic
 
-.PHONY: all uefi-build clean
+.PHONY: all uefi-build check clean
 
 all: uefi-build
 
 uefi-build: $(EFI)
+
+check: uefi-build
+	$(READELF) -l $(ELF)
+	@if $(READELF) -l $(ELF) | grep -q 'RWE'; then \
+		echo "error: ELF contains an RWX load segment"; \
+		exit 1; \
+	fi
 
 $(BUILD):
 	mkdir -p $(BUILD)

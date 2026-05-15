@@ -21,6 +21,15 @@ build/tetris.efi
 This repository intentionally carries minimal UEFI type definitions in
 `src/uefi.h`, so it does not require EDK II or gnu-efi headers for this build.
 
+For a local validation pass, run:
+
+```sh
+make check
+```
+
+This builds the EFI image and prints the ELF program headers so linker segment
+permissions can be inspected.
+
 ## Run
 
 Copy `build/tetris.efi` to a FAT EFI system partition or a UEFI Shell virtual
@@ -29,6 +38,21 @@ disk, then run:
 ```text
 tetris.efi
 ```
+
+One QEMU workflow is to create a small FAT directory and boot it with OVMF:
+
+```sh
+mkdir -p esp/EFI/BOOT
+cp build/tetris.efi esp/EFI/BOOT/BOOTX64.EFI
+qemu-system-x86_64 \
+  -machine q35 \
+  -m 256M \
+  -bios /usr/share/OVMF/OVMF_CODE.fd \
+  -drive format=raw,file=fat:rw:esp
+```
+
+The OVMF firmware path can vary by distribution. Common alternatives include
+`/usr/share/edk2/ovmf/OVMF_CODE.fd` and `/usr/share/ovmf/OVMF.fd`.
 
 Controls:
 
@@ -54,3 +78,6 @@ The Makefile uses the local GNU toolchain to build an x86_64 UEFI application:
 - `objcopy` converts it to `efi-app-x86_64`.
 
 Manual testing should be done in QEMU with OVMF or on UEFI-capable hardware.
+For a smoke test, verify that the game launches, both players can move, rotate,
+soft drop, and hard drop pieces, pause/restart works, auto-play toggles with
+`T`, and `Q` or Esc exits back to firmware.

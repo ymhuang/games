@@ -130,8 +130,22 @@ static const UINT8 dummy_reloc[12] __attribute__((section(".reloc"), used)) = {
 
 static void print(CHAR16 *s)
 {
-    if (g_st && g_st->ConOut) {
+    if (g_st && g_st->ConOut && g_st->ConOut->OutputString) {
         g_st->ConOut->OutputString(g_st->ConOut, s);
+    }
+}
+
+static void clear_text_console(void)
+{
+    if (g_st && g_st->ConOut && g_st->ConOut->ClearScreen) {
+        g_st->ConOut->ClearScreen(g_st->ConOut);
+    }
+}
+
+static void reset_text_input(void)
+{
+    if (g_st && g_st->ConIn && g_st->ConIn->Reset) {
+        g_st->ConIn->Reset(g_st->ConIn, 0);
     }
 }
 
@@ -642,9 +656,11 @@ static void tick_auto_player(Player *player)
 static UINTN cell_size(void)
 {
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = g_gop->Mode->Info;
-    UINTN by_height = (info->VerticalResolution - UI_TOP_MARGIN) / BOARD_H;
-    UINTN by_width = (info->HorizontalResolution - UI_SIDE_MARGIN) /
-                     ((BOARD_W * PLAYER_COUNT) + UI_BOARD_EXTRA_COLUMNS);
+    UINTN by_height = info->VerticalResolution > UI_TOP_MARGIN ?
+                      (info->VerticalResolution - UI_TOP_MARGIN) / BOARD_H : MIN_CELL_SIZE;
+    UINTN by_width = info->HorizontalResolution > UI_SIDE_MARGIN ?
+                     (info->HorizontalResolution - UI_SIDE_MARGIN) /
+                     ((BOARD_W * PLAYER_COUNT) + UI_BOARD_EXTRA_COLUMNS) : MIN_CELL_SIZE;
     UINTN cell = by_height < by_width ? by_height : by_width;
 
     if (cell < MIN_CELL_SIZE) {
@@ -783,7 +799,13 @@ static void reset_game(void)
 
 static int read_key(EFI_INPUT_KEY *key)
 {
-    EFI_STATUS status = g_st->ConIn->ReadKeyStroke(g_st->ConIn, key);
+    EFI_STATUS status;
+
+    if (!g_st || !g_st->ConIn || !g_st->ConIn->ReadKeyStroke) {
+        return 0;
+    }
+
+    status = g_st->ConIn->ReadKeyStroke(g_st->ConIn, key);
     return status == EFI_SUCCESS;
 }
 
@@ -915,30 +937,73 @@ static void tick_player(Player *player)
     player->frame++;
 }
 
+static EFI_STATUS require_uefi_services(void)
+{
+    if (!g_st) {
+        return EFI_INVALID_PARAMETER;
+    }
+    if (!g_bs || !g_bs->LocateProtocol || !g_bs->Stall) {
+        print(L"UEFI Tetris requires Boot Services LocateProtocol and Stall.\r\n");
+        return EFI_UNSUPPORTED;
+    }
+    if (!g_st->ConIn || !g_st->ConIn->ReadKeyStroke) {
+        print(L"UEFI Tetris requires Simple Text Input for controls.\r\n");
+        return EFI_UNSUPPORTED;
+    }
+    if (!g_st->ConOut || !g_st->ConOut->OutputString) {
+        return EFI_UNSUPPORTED;
+    }
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS init_graphics(void)
+{
+    EFI_STATUS status;
+
+    status = g_bs->LocateProtocol((EFI_GUID *)&gop_guid, 0, (VOID **)&g_gop);
+    if (status != EFI_SUCCESS) {
+        print(L"UEFI Tetris requires Graphics Output Protocol, but GOP was not found.\r\n");
+        return status;
+    }
+    if (!g_gop || !g_gop->Mode || !g_gop->Mode->Info) {
+        print(L"UEFI Tetris requires a valid Graphics Output Protocol mode.\r\n");
+        return EFI_UNSUPPORTED;
+    }
+    if (!g_gop->Blt) {
+        print(L"UEFI Tetris requires GOP Blt drawing, but Blt is unavailable.\r\n");
+        return EFI_UNSUPPORTED;
+    }
+    if (g_gop->Mode->Info->HorizontalResolution == 0 ||
+        g_gop->Mode->Info->VerticalResolution == 0) {
+        print(L"UEFI Tetris requires a non-empty graphics mode.\r\n");
+        return EFI_UNSUPPORTED;
+    }
+    return EFI_SUCCESS;
+}
+
 EFI_STATUS EFIAPI EfiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
 {
     EFI_STATUS status;
 
     (void)image_handle;
     g_st = system_table;
+    if (!g_st) {
+        return EFI_INVALID_PARAMETER;
+    }
     g_bs = system_table->BootServices;
     rng_state ^= system_table->Hdr.CRC32;
 
-    if (g_st->ConOut) {
-        g_st->ConOut->ClearScreen(g_st->ConOut);
-    }
-    if (g_st->ConIn) {
-        g_st->ConIn->Reset(g_st->ConIn, 0);
+    status = require_uefi_services();
+    if (status != EFI_SUCCESS) {
+        return status;
     }
 
-    status = g_bs->LocateProtocol((EFI_GUID *)&gop_guid, 0, (VOID **)&g_gop);
-    if (status != EFI_SUCCESS || !g_gop || !g_gop->Mode || !g_gop->Mode->Info) {
-        print(L"UEFI Tetris requires Graphics Output Protocol, but GOP was not found.\r\n");
-        return status == EFI_SUCCESS ? EFI_UNSUPPORTED : status;
-    }
-    if (!g_gop->Blt) {
-        print(L"UEFI Tetris requires GOP Blt drawing, but Blt is unavailable.\r\n");
-        return EFI_UNSUPPORTED;
+    clear_text_console();
+    reset_text_input();
+
+    status = init_graphics();
+    if (status != EFI_SUCCESS) {
+        return status;
     }
 
     reset_game();
@@ -951,9 +1016,7 @@ EFI_STATUS EFIAPI EfiMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_tabl
     }
 
     clear_screen_graphics();
-    if (g_st->ConOut) {
-        g_st->ConOut->ClearScreen(g_st->ConOut);
-    }
+    clear_text_console();
     print(L"Thanks for playing UEFI Tetris.\r\n");
     return EFI_SUCCESS;
 }
