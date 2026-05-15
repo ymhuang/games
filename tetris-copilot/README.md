@@ -1,0 +1,29 @@
+UEFI Tetris
+
+This repository contains a simple Tetris implementation as a UEFI application (PE/COFF .efi) using the GNU-EFI headers.
+
+Requirements
+- GNU toolchain (gcc, ld, objcopy)
+- GNU-EFI development files (headers and linker scripts). On Debian/Ubuntu: sudo apt install gnu-efi build-essential
+
+Build
+- If your distro installs GNU-EFI to a nonstandard path, update GNUEFI_LIBDIR in the Makefile. Common locations:
+  - /usr/lib/gnu-efi
+  - /usr/lib/x86_64-linux-gnu/gnu-efi
+  - /usr/lib64/gnu-efi
+
+- To locate the expected linker script on your system run:
+    find /usr -name "elf_x86_64_efi.lds" 2>/dev/null
+  then set GNUEFI_LIBDIR to the directory that contains the "gnu-efi" folder.
+
+- Build with:
+    make
+
+If make fails with a missing linker script error, install the gnu-efi dev package for your distro or set GNUEFI_LIBDIR to the path where elf_x86_64_efi.lds is located.
+
+Deploy
+- Copy tetris.efi to a FAT32-formatted USB or to the EFI partition and run from the UEFI shell: fs0:\tetris.efi
+
+Notes
+- The Makefile uses common default paths; adjust EFIINCL and GNUEFI_LIBDIR if needed.
+- This is a compact implementation intended as a proof-of-concept. Contributions and fixes welcome.
